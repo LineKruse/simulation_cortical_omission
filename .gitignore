@@ -1,1 +1,5 @@
-scripts/OPM_array/template/alpha1.xlsx
+data/OPM/template/alpha1.xlsx
+
+
+# pycache/
+__pycache__/
