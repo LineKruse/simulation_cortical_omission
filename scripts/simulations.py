@@ -124,7 +124,7 @@ for region in regions:
     sim_folder = folder
 
     #Initate  
-    simulator = SurfSimulator()
+    #simulator = SurfSimulator()
     simulator = VolSimulator()
     simulator.set_params(output_path=sim_folder)
     simulator.create_info_obj()

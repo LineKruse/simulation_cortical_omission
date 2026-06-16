@@ -16,21 +16,22 @@ from mne.simulation.metrics import (
 )
 from functools import partial 
 import seaborn as sns
-os.chdir('/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/scripts')
+dir = os.getwcd()
+os.chdir(os.path.join(dir,'scripts')
 from helper_functions import compute_RLE
 
 folder = 'thalamic_1nA_occipital_01nA'
-recon_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/reconstructions'
+recon_path = os.path.join(dir,'data/reconstructions')
 recon_folder = os.path.join(recon_path, folder)
-sim_folder = f'/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/simulations/{folder}'
+sim_folder = os.path.join(dir, f'data/simulations/{folder}')
 vol_regions = ['Left-Caudate','Right-Caudate','Left-Cerebellum-Cortex','Right-Cerebellum-Cortex','Left-Hippocampus','Right-Hippocampus','Left-Thalamus-Proper','Right-Thalamus-Proper']
 surf_regions = ['lateraloccipital-lh']
 subject = 'fsaverage'
-subjects_dir = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/freesurfer/subjects'
-aseg_fname='/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/freesurfer/fsaverage/mri/aparc+aseg.mgz'
+subjects_dir = os.path.join(dir,'data/freesurfer/subjects')
+aseg_fname= os.path.join(dir, 'data/freesurfer/fsaverage/mri/aparc+aseg.mgz')
 surf_spacing = 'oct6'
 vol_spacing = 5.0 
-fname_raw = raw_fname =  '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif'
+fname_raw = os.path.join(dir, 'data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif')
 fname_bem = os.path.join(subjects_dir, subject, 'bem','fsaverage-5120-5120-5120-bem-sol.fif') 
 fname_trans = 'fsaverage'
 
