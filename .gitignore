@@ -1,0 +1,9 @@
+data/OPM/template/alpha1.xlsx
+
+
+# pycache/
+__pycache__/
+
+data/MNE-sample-data/
+
+data/freesurfer/
