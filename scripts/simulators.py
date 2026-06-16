@@ -14,25 +14,27 @@ from mne.simulation.metrics import (
     spatial_deviation_error,
 )
 from functools import partial
+import os
 
 
 class VolSimulator():
 
     def __init__(self):
-        os.chdir('/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/scripts')
+        dir = os.getcwd()
+        os.chdir(os.path.join(dir, 'scripts'))
         pass
 
     def set_params(self, output_path):
         self.random_state = 42
 
         #Paths 
-        self.raw_fname =  '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif'
+        self.raw_fname =  os.path.join(dir,'data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif')
         self.subject = 'fsaverage'
-        self.subjects_dir = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/freesurfer/subjects'
+        self.subjects_dir = os.path.join(dir, 'data/freesurfer/subjects')
         self.fname_trans = 'fsaverage' #use built-in trans file for fsaverage 
         self.fname_bem = os.path.join(self.subjects_dir, self.subject, 'bem','fsaverage-5120-5120-5120-bem-sol.fif')
-        self.fname_aseg = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/freesurfer/fsaverage/mri/aparc+aseg.mgz'
-        self.fname_cov = os.path.join('/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis-cov.fif')
+        self.fname_aseg = os.path.join(dir, 'data/freesurfer/fsaverage/mri/aparc+aseg.mgz')
+        self.fname_cov = os.path.join(dir, 'data/MNE-sample-data/MEG/sample/sample_audvis-cov.fif')
         self.output_path = output_path
         self.figure_path = os.path.join(self.output_path, 'figures')
 
