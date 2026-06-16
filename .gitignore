@@ -5,3 +5,5 @@ data/OPM/template/alpha1.xlsx
 __pycache__/
 
 data/MNE-sample-data/
+
+data/freesurfer/
