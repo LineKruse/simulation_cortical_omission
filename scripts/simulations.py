@@ -16,7 +16,8 @@ from mne.simulation.metrics import (
 )
 from functools import partial
 
-os.chdir('/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/scripts')
+dir = os.getcwd()
+os.chdir(os.path.join(dir,'scripts'))
 from simulators import VolSimulator, SurfSimulator, MixSimulator
 
 
@@ -296,7 +297,109 @@ for vol_extent in patch_sizes_vol:
 
 
 
+############################################################################
+#    COMPARE SIGNAL INCREASE by increasing patch size (with same 
+#        amplitude in each dipole) or keeping one dipole and increasing 
+#        amplitude      
+# - Testing with V1 activation 
+# - SNR increase is the same in the two analyses 
+# - Analysis A) increasing patch size from 2-15 mm, with amplitude of 0.1
+# - Analysis B) using CoM dipole, increasing amplitude from 0.1-1.5 
+############################################################################
+        
 
+#----------------------- Increasing patch size ----------------##
+amplitude = 0.1
+folder = os.path.join(dir, f'data/simulations/occpitial_{amplitude}nA_increasing_size')
+
+#regions = ['lateraloccipital-lh']
+regions = ["ctx-lh-lateraloccipital"]
+
+/Volumes/Elements/simulation_cortical_omission/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif
+/Volumes/Elements/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif
+
+for region in regions: 
+    print(f'--------- Running region {region} ----------')
+    if not os.path.exists(folder):
+        os.mkdir(folder)
+
+    sim_folder = folder
+
+    #Initate  
+    simulator = VolSimulator()
+    simulator.set_params(output_path=sim_folder)
+    simulator.create_info_obj()
+
+    #Generate SRC and FWD for simulations 
+    #simulator.generate_src(save=True, plot=True)
+     #simulator.generate_fwd(save=True)
+    
+    simulator.generate_src(vol_labels=[region], save=True, plot=False)
+    #simulator.src
+
+    simulator.generate_fwd(save=True)
+
+    #Plot fwd with sources 
+    simulator.plot_fwd_with_sources(surface='white')
+
+    extents = [2., 4., 6., 8.,10.]
+
+    for extent in extents: 
+
+        #Generate Label obj to use for simulations defined by label, seed and extent (if seeds=None it will compute center of mass and use that as seed)
+        #simulator.grow_sim_source_label(label_regex=region, location='center', extent=extent)
+        simulator.grow_sim_source_label(labels=region, seeds=None, extents=extent)
+
+        seed_pos_lh = simulator.src[0]['rr'][np.where(simulator.src[0]['vertno']==simulator.seeds[region])]
+        label_pos_lh = [simulator.src[0]['rr'][v] for v in simulator.src[0]['vertno'] if v in simulator.labels[0].vertices]
+
+        #Check vertex positions of full region, grown label and seed 
+        Brain = mne.viz.get_brain_class()
+        brain = Brain(
+            'fsaverage',
+            hemi='both',
+            surf='white',
+            alpha=0.5,
+            background='black',
+            cortex='low_contrast',
+            units='m',
+            subjects_dir=simulator.subjects_dir
+        )
+        brain.add_foci(label_pos_lh, coords_as_verts=False, color='green', hemi='lh', scale_factor=0.2) #vertices in label
+        # #brain.add_foci(label_pos_rh, coords_as_verts=False, color='red', hemi='rh', scale_factor=0.2) #vertices in label
+        brain.add_foci(seed_pos_lh, coords_as_verts=False, color='blue', hemi='lh', scale_factor=0.2) #position of seed used to grow label (center of mass)
+        # #brain.add_foci(seed_pos_rh, coords_as_verts=False, color='blue', hemi='rh', scale_factor=0.4) #position of seed used to grow label (center of mass)
+        brain.save_image(os.path.join(simulator.figure_path, f'source_label_{region}_{extent}.png'))
+        brain.close()
+
+        #Simualtor raw STCs 
+        simulator.create_time_series(amplitude=amplitude, latency=0.0)
+        simulator.plot_time_series(save=True, show=False)
+        simulator.initiate_sourcesimulator()
+        simulator.add_to_sourcesimulator(labels="all") #if all, will add time seires*events for all labels in simulator.labels
+
+        #Simulate raw 
+        simulator.sim_raw(add_iir=False, add_eog=True, add_ecg=True)
+        simulator.plot_raw(save=True, show=False)
+
+        #Compute evoked 
+        simulator.compute_evoked()
+        simulator.plot_joint(picks='grad', save=True, show=False)
+        simulator.plot_joint(picks='mag', save=True, show=False)
+
+
+
+
+#COMPUTE SNR from evoked 
+extent = evo.split("-")[-2].split("_")[0]
+patch_size.append(extent)
+evoked = mne.read_evokeds(os.path.join(sim_path, sim, evo), baseline=(None, 0))[0]
+inv_fname = evo.replace("-ave.fif", "-inv.fif")
+inv_path = os.path.join(recon_path, sim, "mne", inv_fname)
+inv = mne.minimum_norm.read_inverse_operator(inv_path)
+snr = mne.minimum_norm.estimate_snr(evoked, inv, verbose=None)[0]
+snr_max_list.append(snr.max())
+snr_mean_list.append(snr.mean())
 
 
 
