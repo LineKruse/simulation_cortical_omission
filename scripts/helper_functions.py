@@ -190,6 +190,7 @@ def _verts_within_dist(src, seed, hemi='lh', extent=5.0, metric='euclidean'):
     dist_map[source] = 0
     verts_added_last.append(source)
 
+
     #Add neighbros until no more neighbors within max_dist can be found 
     #OBS: this runs, but the distances are too small (all 100 are added), check the coords and metrics 
     while len(verts_added_last) > 0: 
@@ -282,6 +283,8 @@ def grow_labels(
         seeds = [seeds]
     if isinstance(extents, float):
         extents = [extents]
+    if isinstance(extents, str):
+        extents = [extents]
     n_seeds = len(seeds)
 
     if len(extents) != 1 and len(extents) != n_seeds:
@@ -350,13 +353,17 @@ def _grow_labels(src, seeds, extents, hemis, names, subject):
     labels = []
     for seed, extent, hemi, name in zip(seeds, extents, hemis, names):
         print(seed, extent, hemi, name)
+
         label_verts, label_dist = _verts_within_dist(src, seed, hemi=hemi, extent=extent)
 
         # create a label
         seed_repr = str(seed)
         hemi_idx = 0 if hemi=='lh' else 1
 
-        comment = f"Circular label: seed={seed_repr}, extent={extent:0.1f}mm"
+        if isinstance(extent, str):
+            comment = f"Circular label: seed={seed_repr}, extent=one dipole (CoM)"
+        else: 
+            comment = f"Circular label: seed={seed_repr}, extent={extent:0.1f}mm"
         label = mne.Label(
             vertices=label_verts,
             pos=src[hemi_idx]['rr'][label_verts],

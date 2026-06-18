@@ -20,6 +20,7 @@ import seaborn as sns
 from helper_functions import compute_RLE
 
 dir = os.getcwd()
+dir = dir.replace('/scripts','')
 
 ############################################################################
 #              COMPUTE REGION LOCALIZATIONE ERROR (RLE)    
@@ -28,14 +29,15 @@ dir = os.getcwd()
 recon_path = os.path.join(dir,'data/reconstructions')
 sim_path = os.path.join(dir,'data/simulations')
 
-thresholds = [10, 20, 30, 40, 50, 60, 70, 80, 90, 99]
+#thresholds = [10, 20, 30, 40, 50, 60, 70, 80, 90, 99]
+thresholds=[70]
 
 #Recon for all sims used the same fwd/src 
 fwd_recon = mne.read_forward_solution(os.path.join(recon_path, 'mixed_surfoct6_vols5.0_fwd.fif'))
 src_recon = fwd_recon['src']
 
 #### OCCIPITAL ONLY #### 
-sims_list = ['occipital_01nA']
+sims_list = ['test_increasing_snr_methods/occpitial_0.1nA_increasing_size', 'test_increasing_snr_methods/occpitial_onedip_increasing_amplitude']
 
 region_list = []
 amplitude_list = []
@@ -93,14 +95,16 @@ for sim in sims_list:
             rle_lcmv_list.append(rle_lcmv)
 
 
-df_rle_surf = pd.DataFrame({'region':region_list, 
+df_rle_surf = pd.DataFrame({'region':'occipital', 
                        'amplitude': amplitude_list,
                        'patch_size':extent_list,
                        'n_vertices_sim':n_vertices_list,
                        'threshold': threshold_list,
                        'rle_mne': rle_mne_list,
                        'rle_lcmv':rle_lcmv_list})
-df_rle_surf.to_csv(os.path.join(recon_path, sims_list[0], 'rle_occipital.csv'))
+df_rle_surf['name'] = "size"
+df_rle_surf.name[df_rle_surf.patch_size=='0.0'] = 'amplitude'
+df_rle_surf.to_csv(os.path.join('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/rle.csv'))
 
 rle_sub = df_rle_surf
 #rle_sub = rle_df[rle_df['region']==sims_list[0].split("_")[0]]
@@ -365,10 +369,10 @@ plt.close()
 #              COMPUTE AND PLOT SNR FOR ALL EVOKEDS   
 ############################################################################
 
-###### Occipital 
-recon_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/reconstructions'
-sim_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/simulations'
-sim = 'occipital_01nA'
+###### Occipital - 0.1 nA, increasing patch size  
+recon_path = os.path.join(dir,'data/reconstructions')
+sim_path = os.path.join(dir,'data/simulations')
+sim = 'test_increasing_snr_methods/occpitial_0.1nA_increasing_size'
 evokeds = [f for f in os.listdir(os.path.join(sim_path, sim)) if "-ave.fif" in f]
 region = 'occipital'
 patch_size = []
@@ -390,26 +394,30 @@ for evo in evokeds:
     fig.savefig(os.path.join(recon_path, sim, f"snr_plot_occipital_{extent}.png"))
 
 
-df_snr_surf = pd.DataFrame({'region':"occipital", 
+df_snr_size = pd.DataFrame({'region':"occipital", 
+                        'amplitude':0.1,
                        'patch_size': patch_size,
                        'snr_mean': snr_mean_list,
                        'snr_max':snr_max_list})
-df_snr_surf.to_csv(os.path.join(recon_path, sim, 'snr_surf.csv'))
-df_snr_surf = pd.read_csv(os.path.join(recon_path, sim, 'snr_surf.csv'))
+df_snr_size.to_csv(os.path.join(recon_path, sim, 'snr_01nA_increasing_size.csv'))
+df_snr_size = pd.read_csv(os.path.join(recon_path, sim, 'snr_01nA_increasing_size.csv'))
 
-###### Thalamic 
-recon_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/reconstructions'
-sim_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/simulations'
-sim = 'thalamic_1nA'
-evokeds = [f for f in os.listdir(os.path.join(sim_path, sim, 'Left-Thalamus-Proper')) if "-ave.fif" in f]
-region = 'thalamus'
+###### Occipital, one dipole, increasing amplitude 
+recon_path = os.path.join(dir,'data/reconstructions')
+sim_path = os.path.join(dir,'data/simulations')
+sim = 'test_increasing_snr_methods/occpitial_onedip_increasing_amplitude'
+evokeds = [f for f in os.listdir(os.path.join(sim_path, sim)) if "-ave.fif" in f]
+region = 'occipital'
 patch_size = []
+amplitude_list = []
 snr_max_list = []
 snr_mean_list = []
 for evo in evokeds: 
     extent = evo.split("-")[-2].split("_")[0]
     patch_size.append(extent)
-    evoked = mne.read_evokeds(os.path.join(sim_path, sim,'Left-Thalamus-Proper', evo), baseline=(None, 0))[0]
+    amplitude = evo.split('_nA')[0].split('-')[-1]
+    amplitude_list.append(amplitude)
+    evoked = mne.read_evokeds(os.path.join(sim_path, sim, evo), baseline=(None, 0))[0]
     inv_fname = evo.replace("-ave.fif", "-inv.fif")
     inv_path = os.path.join(recon_path, sim, "mne", inv_fname)
     inv = mne.minimum_norm.read_inverse_operator(inv_path)
@@ -422,51 +430,117 @@ for evo in evokeds:
     # fig.savefig(os.path.join(recon_path, sim, f"snr_plot_{region}_{extent}.png"))
 
 
-df_snr_vol = pd.DataFrame({'region':region,
+df_snr_amplitude = pd.DataFrame({'region':region,
+                        'amplitude': amplitude_list,
                        'patch_size': patch_size,
                        'snr_mean': snr_mean_list,
                        'snr_max':snr_max_list})
-df_snr_vol.to_csv(os.path.join(recon_path, sim, 'snr_vol.csv'))
-df_snr_vol = pd.read_csv(os.path.join(recon_path, sim, 'snr_vol.csv'))
-
-###### Thalamic + Occipital (mixed)
-recon_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/reconstructions'
-sim_path = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/simulations'
-sim = 'thalamic_1nA_occipital_01nA'
-evokeds = [f for f in os.listdir(os.path.join(sim_path, sim)) if "-ave.fif" in f]
-region = 'thalamus_occipital'
-patch_size_surf = []
-patch_size_vol = []
-snr_max_list = []
-snr_mean_list = []
-for evo in evokeds: 
-    extent_vol = evo.split("Proper-lh_")[1].split("_")[0]
-    if "lateraloccipital" in evo:
-        extent_surf = evo.split("lateraloccipital-lh_")[1].split("_")[0]
-    else: 
-        extent_surf = str(0.0)
-    patch_size_vol.append(extent_vol)
-    patch_size_surf.append(extent_surf)
-    evoked = mne.read_evokeds(os.path.join(sim_path, sim, evo), baseline=(None, 0))[0]
-    inv_fname = evo.replace("-ave.fif", "-inv.fif")
-    inv_path = os.path.join(recon_path, sim, "mne", inv_fname)
-    inv = mne.minimum_norm.read_inverse_operator(inv_path)
-    snr = mne.minimum_norm.estimate_snr(evoked, inv, verbose=None)[0]
-    snr_max_list.append(snr.max())
-    snr_mean_list.append(snr.mean())
-
-    plt.figure()
-    fig = mne.viz.plot_snr_estimate(evoked, inv, show=False)
-    fig.savefig(os.path.join(recon_path, sim, f"snr_plot_thalamus{extent_vol}_occipital{extent_surf}.png"))
+df_snr_amplitude.to_csv(os.path.join(recon_path, sim, 'snr_increasing_amplitude.csv'))
+df_snr_amplitude = pd.read_csv(os.path.join(recon_path, sim, 'snr_increasing_amplitude.csv'))
 
 
-df_snr_mix = pd.DataFrame({'region':region,
-                       'patch_size_surf': patch_size_surf,
-                       'patch_size_vol': patch_size_vol,
-                       'snr_mean': snr_mean_list,
-                       'snr_max':snr_max_list})
-df_snr_mix.to_csv(os.path.join(recon_path, sim, 'snr_mix.csv'))
+df_snr_size['name'] = 'size'
+df_snr_amplitude['name'] = 'amplitude'
+df_snr = pd.concat((df_snr_size, df_snr_amplitude))
+df_snr.patch_size = pd.to_numeric(df_snr.patch_size)
+df_snr.to_csv(os.path.join(recon_path, 'test_increasing_snr_methods/snr.csv'))
 
+# ###### Thalamic + Occipital (mixed)
+# recon_path = os.path.join(dir,'data/reconstructions')
+# sim_path = os.path.join(dir,'data/simulations')
+# sim = 'thalamic_1nA_occipital_01nA'
+# evokeds = [f for f in os.listdir(os.path.join(sim_path, sim)) if "-ave.fif" in f]
+# region = 'thalamus_occipital'
+# patch_size_surf = []
+# patch_size_vol = []
+# snr_max_list = []
+# snr_mean_list = []
+# for evo in evokeds: 
+#     extent_vol = evo.split("Proper-lh_")[1].split("_")[0]
+#     if "lateraloccipital" in evo:
+#         extent_surf = evo.split("lateraloccipital-lh_")[1].split("_")[0]
+#     else: 
+#         extent_surf = str(0.0)
+#     patch_size_vol.append(extent_vol)
+#     patch_size_surf.append(extent_surf)
+#     evoked = mne.read_evokeds(os.path.join(sim_path, sim, evo), baseline=(None, 0))[0]
+#     inv_fname = evo.replace("-ave.fif", "-inv.fif")
+#     inv_path = os.path.join(recon_path, sim, "mne", inv_fname)
+#     inv = mne.minimum_norm.read_inverse_operator(inv_path)
+#     snr = mne.minimum_norm.estimate_snr(evoked, inv, verbose=None)[0]
+#     snr_max_list.append(snr.max())
+#     snr_mean_list.append(snr.mean())
+
+#     plt.figure()
+#     fig = mne.viz.plot_snr_estimate(evoked, inv, show=False)
+#     fig.savefig(os.path.join(recon_path, sim, f"snr_plot_thalamus{extent_vol}_occipital{extent_surf}.png"))
+
+
+# df_snr_mix = pd.DataFrame({'region':region,
+#                        'patch_size_surf': patch_size_surf,
+#                        'patch_size_vol': patch_size_vol,
+#                        'snr_mean': snr_mean_list,
+#                        'snr_max':snr_max_list})
+# df_snr_mix.to_csv(os.path.join(recon_path, sim, 'snr_mix.csv'))
+
+
+##Plot SNR for increasing size vs increasing volume 
+df_snr_size.patch_size = pd.to_numeric(df_snr_size.patch_size)
+df_snr_amplitude.amplitude = pd.to_numeric(df_snr_amplitude.amplitude)
+fig, ax = plt.subplots(1, 2, sharey=True)
+sns.lineplot(data=df_snr_size, x='patch_size', y='snr_max', color='red', ax=ax[0])
+sns.scatterplot(data=df_snr_size, x='patch_size', y='snr_max', color='red', ax=ax[0])
+sns.lineplot(data=df_snr_amplitude, x='amplitude', y='snr_max', color='blue', ax=ax[1])
+sns.scatterplot(data=df_snr_amplitude, x='amplitude', y='snr_max', color='blue', ax=ax[1])
+plt.savefig('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/snr.png')
+plt.show()
+
+#Plot RLE as function of SNR 
+df_rle = df_rle_surf.copy()
+df_rle.amplitude = pd.to_numeric(df_rle.amplitude)
+df_rle.patch_size = pd.to_numeric(df_rle.patch_size)
+df = pd.merge(df_snr[['name','amplitude','patch_size','snr_mean','snr_max']], df_rle, on=['name','amplitude','patch_size'])
+df.to_csv('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/rle_by_snr.csv')
+
+plt.figure()
+sns.lineplot(data=df, x='snr_max',y='rle_lcmv', hue='name')
+sns.scatterplot(data=df, x='snr_max',y='rle_lcmv', hue='name', legend=None)
+plt.legend(title='Method', loc='upper right')
+plt.ylabel('RLE (mm)')
+plt.xlabel('SNR (max)')
+plt.suptitle('LCMV Reconstruction')
+plt.savefig('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/rle_by_snr_lcmv.png')
+plt.show()
+
+plt.figure()
+sns.lineplot(data=df[df.snr_max<5.0], x='snr_max',y='rle_lcmv', hue='name')
+sns.scatterplot(data=df[df.snr_max<5.0], x='snr_max',y='rle_lcmv', hue='name', legend=None)
+plt.legend(title='Method', loc='upper right')
+plt.ylabel('RLE (mm)')
+plt.xlabel('SNR (max)')
+plt.suptitle('LCMV Reconstruction')
+plt.savefig('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/rle_by_snr_lcmv_zoom.png')
+plt.show()
+
+plt.figure()
+sns.lineplot(data=df, x='snr_max',y='rle_mne', hue='name')
+sns.scatterplot(data=df, x='snr_max',y='rle_mne', hue='name', legend=None)
+plt.legend(title='Method', loc='upper right')
+plt.ylabel('RLE (mm)')
+plt.xlabel('SNR (max)')
+plt.suptitle('MNE Reconstruction')
+plt.savefig('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/rle_by_snr_mne.png')
+plt.show()
+
+plt.figure()
+sns.lineplot(data=df[df.snr_max<5.0], x='snr_max',y='rle_mne', hue='name')
+sns.scatterplot(data=df[df.snr_max<5.0], x='snr_max',y='rle_mne', hue='name', legend=None)
+plt.legend(title='Method', loc='upper right')
+plt.ylabel('RLE (mm)')
+plt.xlabel('SNR (max)')
+plt.suptitle('MNE Reconstruction')
+plt.savefig('/Volumes/Elements/simulation_cortical_omission/data/reconstructions/test_increasing_snr_methods/rle_by_snr_mne_zoom.png')
+plt.show()
 
 ##PLOT MIX 
 df_snr_mix.patch_size_surf = pd.to_numeric(df_snr_mix.patch_size_surf)

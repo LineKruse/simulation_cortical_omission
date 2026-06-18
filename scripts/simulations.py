@@ -310,7 +310,9 @@ for vol_extent in patch_sizes_vol:
 
 #----------------------- Increasing patch size ----------------##
 amplitude = 0.1
-folder = os.path.join(dir, f'data/simulations/occpitial_{amplitude}nA_increasing_size')
+folder = os.path.join(dir, f'data/simulations/test_increasing_snr_methods/occpitial_{amplitude}nA_increasing_size')
+#extents = [2., 4., 6., 8.,10.] #SNR = 1.3 - 19.8 
+extents = [1.0, 1.5, 2.5, 3.0, 3.5, 4.5]
 
 #regions = ['lateraloccipital-lh']
 regions = ["ctx-lh-lateraloccipital"]
@@ -339,8 +341,6 @@ for region in regions:
     #Plot fwd with sources 
     simulator.plot_fwd_with_sources(surface='white')
 
-    extents = [2., 4., 6., 8.,10.]
-
     for extent in extents: 
 
         #Generate Label obj to use for simulations defined by label, seed and extent (if seeds=None it will compute center of mass and use that as seed)
@@ -362,7 +362,7 @@ for region in regions:
             units='m',
             subjects_dir=simulator.subjects_dir
         )
-        brain.add_foci(label_pos_lh, coords_as_verts=False, color='green', hemi='lh', scale_factor=0.2) #vertices in label
+        brain.add_foci(label_pos_lh, coords_as_verts=False, color='red', hemi='lh', scale_factor=0.2) #vertices in label
         # #brain.add_foci(label_pos_rh, coords_as_verts=False, color='red', hemi='rh', scale_factor=0.2) #vertices in label
         brain.add_foci(seed_pos_lh, coords_as_verts=False, color='blue', hemi='lh', scale_factor=0.2) #position of seed used to grow label (center of mass)
         # #brain.add_foci(seed_pos_rh, coords_as_verts=False, color='blue', hemi='rh', scale_factor=0.4) #position of seed used to grow label (center of mass)
@@ -377,26 +377,92 @@ for region in regions:
 
         #Simulate raw 
         simulator.sim_raw(add_iir=False, add_eog=True, add_ecg=True)
-        simulator.plot_raw(save=True, show=False)
+        #simulator.plot_raw(save=True, show=False)
 
         #Compute evoked 
         simulator.compute_evoked()
-        simulator.plot_joint(picks='grad', save=True, show=False)
-        simulator.plot_joint(picks='mag', save=True, show=False)
+        #simulator.plot_joint(picks='grad', save=True, show=False)
+        #simulator.plot_joint(picks='mag', save=True, show=False)
 
 
 
+#----------------------- Increasing amplitude (only CoM dipole) ----------------##
+#amplitudes = [0.1, 0.3, 0.5, 0.8, 1, 1.2] #SNR = 1.06-1.07 
+#amplitudes = [0.1, 2.0, 4.0, 6.0, 8.0, 10.0] #SNR = 1.06 - 3.8 
+amplitudes = [15.0, 20.0, 25.0, 30., 35.0, 40., 50.] #SNR = 4.9 - 15.9
+folder = os.path.join(dir, f'data/simulations/test_increasing_snr_methods/occpitial_onedip_increasing_amplitude')
 
-#COMPUTE SNR from evoked 
-extent = evo.split("-")[-2].split("_")[0]
-patch_size.append(extent)
-evoked = mne.read_evokeds(os.path.join(sim_path, sim, evo), baseline=(None, 0))[0]
-inv_fname = evo.replace("-ave.fif", "-inv.fif")
-inv_path = os.path.join(recon_path, sim, "mne", inv_fname)
-inv = mne.minimum_norm.read_inverse_operator(inv_path)
-snr = mne.minimum_norm.estimate_snr(evoked, inv, verbose=None)[0]
-snr_max_list.append(snr.max())
-snr_mean_list.append(snr.mean())
+#regions = ['lateraloccipital-lh']
+regions = ["ctx-lh-lateraloccipital"]
+
+for region in regions: 
+    print(f'--------- Running region {region} ----------')
+    if not os.path.exists(folder):
+        os.mkdir(folder)
+
+    sim_folder = folder
+
+    #Initate  
+    simulator = VolSimulator()
+    simulator.set_params(output_path=sim_folder)
+    simulator.create_info_obj()
+
+    #Generate SRC and FWD for simulations 
+    #simulator.generate_src(save=True, plot=True)
+     #simulator.generate_fwd(save=True)
+    
+    simulator.generate_src(vol_labels=[region], save=True, plot=False)
+    #simulator.src
+
+    simulator.generate_fwd(save=True)
+
+    #Plot fwd with sources 
+    simulator.plot_fwd_with_sources(surface='white')
+
+    extent=0.0 ##only using center of mass (one dipole)
+
+    for amplitude in amplitudes: 
+
+        #Generate Label obj to use for simulations defined by label, seed and extent (if seeds=None it will compute center of mass and use that as seed)
+        #simulator.grow_sim_source_label(label_regex=region, location='center', extent=extent)
+        simulator.grow_sim_source_label(labels=region, seeds=None, extents=extent)
+
+        seed_pos_lh = simulator.src[0]['rr'][np.where(simulator.src[0]['vertno']==simulator.seeds[region])]
+        label_pos_lh = [simulator.src[0]['rr'][v] for v in simulator.src[0]['vertno'] if v in simulator.labels[0].vertices]
+
+        #Check vertex positions of full region, grown label and seed 
+        Brain = mne.viz.get_brain_class()
+        brain = Brain(
+            'fsaverage',
+            hemi='both',
+            surf='white',
+            alpha=0.5,
+            background='black',
+            cortex='low_contrast',
+            units='m',
+            subjects_dir=simulator.subjects_dir
+        )
+        brain.add_foci(label_pos_lh, coords_as_verts=False, color='red', hemi='lh', scale_factor=0.2) #vertices in label
+        # #brain.add_foci(label_pos_rh, coords_as_verts=False, color='red', hemi='rh', scale_factor=0.2) #vertices in label
+        brain.add_foci(seed_pos_lh, coords_as_verts=False, color='blue', hemi='lh', scale_factor=0.2) #position of seed used to grow label (center of mass)
+        # #brain.add_foci(seed_pos_rh, coords_as_verts=False, color='blue', hemi='rh', scale_factor=0.4) #position of seed used to grow label (center of mass)
+        brain.save_image(os.path.join(simulator.figure_path, f'source_label_{region}_{extent}.png'))
+        brain.close()
+
+        #Simualtor raw STCs 
+        simulator.create_time_series(amplitude=amplitude, latency=0.0)
+        simulator.plot_time_series(save=True, show=False)
+        simulator.initiate_sourcesimulator()
+        simulator.add_to_sourcesimulator(labels="all") #if all, will add time seires*events for all labels in simulator.labels
+
+        #Simulate raw 
+        simulator.sim_raw(add_iir=False, add_eog=True, add_ecg=True)
+        #simulator.plot_raw(save=True, show=False)
+
+        #Compute evoked 
+        simulator.compute_evoked()
+        #simulator.plot_joint(picks='grad', save=True, show=False)
+        #simulator.plot_joint(picks='mag', save=True, show=False)
 
 
 

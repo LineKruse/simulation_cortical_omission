@@ -18,15 +18,16 @@ from functools import partial
 import seaborn as sns
 from helper_functions import compute_RLE
 
-dir = os.getwcd()
-os.chdir(os.path.join(dir,'scripts')
+dir = os.getcwd()
+dir = dir.replace('/scripts','')
 
 
-folder = 'thalamic_1nA_occipital_01nA'
+folder = 'test_increasing_snr_methods/occpitial_0.1nA_increasing_size'
+#folder = 'test_increasing_snr_methods/occpitial_onedip_increasing_amplitude'
 recon_path = os.path.join(dir,'data/reconstructions')
 recon_folder = os.path.join(recon_path, folder)
 sim_folder = os.path.join(dir, f'data/simulations/{folder}')
-vol_regions = ['Left-Caudate','Right-Caudate','Left-Cerebellum-Cortex','Right-Cerebellum-Cortex','Left-Hippocampus','Right-Hippocampus','Left-Thalamus-Proper','Right-Thalamus-Proper']
+#vol_regions = ['Left-Caudate','Right-Caudate','Left-Cerebellum-Cortex','Right-Cerebellum-Cortex','Left-Hippocampus','Right-Hippocampus','Left-Thalamus-Proper','Right-Thalamus-Proper']
 surf_regions = ['lateraloccipital-lh']
 subject = 'fsaverage'
 subjects_dir = os.path.join(dir,'data/freesurfer/subjects')
@@ -41,7 +42,7 @@ fname_trans = 'fsaverage'
 raw_sample = mne.io.read_raw_fif(fname_raw)
 info = raw_sample.info
 
-#Load src and fwd 
+#Load src and fwd (differnet from those used for simulations)
 src_mix = mne.read_source_spaces(os.path.join(recon_path,f'mixed_surf{surf_spacing}_vols{vol_spacing}_src.fif'))
 fwd_mix = mne.read_forward_solution(os.path.join(recon_path,f'mixed_surf{surf_spacing}_vols{vol_spacing}_fwd.fif'))
 
