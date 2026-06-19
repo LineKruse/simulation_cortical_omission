@@ -25,8 +25,9 @@ class VolSimulator():
         #os.chdir(dir)
         pass
 
-    def set_params(self, output_path):
+    def set_params(self, output_path, sensor_array='squids'):
         self.random_state = 42
+        self.sensor_array = sensor_array
 
         #Paths 
         self.raw_fname =  os.path.join(self.dir,'data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif')
@@ -36,7 +37,13 @@ class VolSimulator():
         self.fname_trans = 'fsaverage' #use built-in trans file for fsaverage 
         self.fname_bem = os.path.join(self.subjects_dir, self.subject, 'bem','fsaverage-5120-5120-5120-bem-sol.fif')
         self.fname_aseg = os.path.join(self.dir, 'data/freesurfer/fsaverage/mri/aparc+aseg.mgz')
-        self.fname_cov = os.path.join(self.dir, 'data/MNE-sample-data/MEG/sample/sample_audvis-cov.fif')
+        if sensor_array=='squids':
+            self.fname_cov = os.path.join(self.dir, 'data/MNE-sample-data/MEG/sample/sample_audvis-cov.fif')
+        elif sensor_array=='opm':
+            #self.fname_cov = os.path.join(self.dir, 'data/MNE-sample-data/MEG/sample/sample_audvis-cov.fif')
+            self.fname_cov = None
+        else: 
+            raise ValueError('Sensory array must be one of ["squids", "opm"]')
         self.output_path = output_path
         self.figure_path = os.path.join(self.output_path, 'figures')
 
@@ -50,12 +57,14 @@ class VolSimulator():
         self.vol_spacing = 5.0 
 
 
-    def create_info_obj(self, sensor_array='squid'):
+    def create_info_obj(self):
         self.sample_raw = mne.io.read_raw_fif(self.raw_fname)
-        if sensor_array=='squids':
+        if self.sensor_array=='squids':
             self.info = self.sample_raw.pick(picks=['meg']).info
-        if sensor_array=='opm':
+        elif self.sensor_array=='opm':
             self.info = mne.io.read_info(self.raw_opm_info_fname)
+        else: 
+            raise ValueError(f'No raw info object available for {self.sensor_array} sensor array')
 
     
     def data_fun(self, amplitude, latency=0.02):
@@ -311,18 +320,23 @@ class VolSimulator():
 
         self.raw = mne.simulation.simulate_raw(self.info, self.source_simulator, forward=self.fwd)
         self.raw = self.raw.pick(picks=["meg", "stim"], exclude="bads")
-
-        noise_cov = mne.read_cov(self.fname_cov)
-
-        if add_iir: 
-            iir_filter = mne.time_frequency.fit_iir_model_raw(self.sample_raw, order=5, picks=picks, tmin=60, tmax=180)[1]
-            mne.simulation.add_noise(
-                self.raw, cov=noise_cov, iir_filter=iir_filter, random_state=self.random_state
-            )
+        
+        #FIXME currently have no cov matrix for OPM sensory arrays, running without added noise 
+        if self.fname_cov is None: 
+            noise_std = 40e-15 #currently usign 40 Ft noise level for OPM (suggsted in some places, unsure if they refer to the same thing)
+            noise_cov = mne.make_ad_hoc_cov(self.raw.info, std=noise_std) # default noise value is 20 fT for magnetometers 
         else: 
-            mne.simulation.add_noise(
-                self.raw, cov=noise_cov, iir_filter=None, random_state=self.random_state
-            )
+            noise_cov = mne.read_cov(self.fname_cov)
+
+        if add_iir: #FIXME only works for SQUID sims right now, as it computes iir filter based on mne sample data 
+            iir_filter = mne.time_frequency.fit_iir_model_raw(self.sample_raw, order=5, picks=picks, tmin=60, tmax=180)[1]
+        else: 
+            iir_filter = None 
+        
+        mne.simulation.add_noise(
+            self.raw, cov=noise_cov, iir_filter=None, random_state=self.random_state
+        )
+
         if add_eog: 
             mne.simulation.add_eog(self.raw, random_state=self.random_state)
         if add_ecg: 
