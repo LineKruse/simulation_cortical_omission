@@ -24,19 +24,22 @@ from helmet_templates import load_helmet_template, TemplateBase
 
 
 class OPMSensorLayout(TemplateBase):
-    def __init__(self, labels, depth_mm, helmet_template, coil_type:NamedInt = NamedInt("FieldLine OPM sensor Gen1 size = 2.00   mm", 8101), sensor_depth_offset_mm=52):
+    def __init__(self, labels, depth_mm, helmet_template, n_axis, coil_type:NamedInt = NamedInt("FieldLine OPM sensor Gen1 size = 2.00   mm", 8101), sensor_depth_offset_mm=52):
         self.depth_mm = np.asarray(depth_mm)
         self.helmet = helmet_template
         self.coil_type = coil_type
         self.offset = sensor_depth_offset_mm
+        self.n_axis=n_axis
 
         chan_pos = self._compute_positions(labels)
+        chan_ori = self._compute_orientations(labels)
 
         super().__init__(labels, self.helmet.unit)
 
         self.chan_pos = chan_pos
-        self.chan_ori = self.helmet.get_chs_ori(labels)
+        self.chan_ori = chan_ori
 
+        
     
     def _compute_positions(self, labels): #len_sleeve:float = 75/1000, offset:float = 13/1000
         template_ori = self.helmet.get_chs_ori(labels)
@@ -54,7 +57,57 @@ class OPMSensorLayout(TemplateBase):
 
             transformed_pos.append([x, y, z])
         
+        #add same sensors again (to allow 2 orientations) FIXME: for now using same orientations, must be updated when you have a good solution
+        if self.n_axis==2: 
+            for pos, ori, depth in zip(template_pos, template_ori, self.depth_mm):
+                updated_depth = (52-depth)/1000
+                x = (pos[0] - (updated_depth* ori[2,0]))
+                y = (pos[1] - (updated_depth* ori[2,1]))
+                z = pos[2] + (updated_depth * ori[2,2])
+
+                transformed_pos.append([x, y, z])
+            
         return np.array(transformed_pos)
+
+    def _compute_orientations(self, labels):
+
+        template_ori = self.helmet.get_chs_ori(labels)        
+        
+        if n_meas_axis==1: 
+            transformed_ori = template_ori
+        
+        elif n_meas_axis==2: 
+            transformed_ori = []
+
+            #Append rotated ori for all sensor positions (first half)
+            for idx in range(0, int(len(template_ori)/2)): 
+                transformed_ori.append(template_ori[idx])
+
+            #Append rotated ori for all sensor positions (second half)
+            for idx in range(0, int(len(template_ori)/2)): 
+        
+                #Get original coordiantes and resphape into 3x3 (rep x, y and z directions)
+                orig_coords = template_ori[idx] #testing on MEG 0123
+                #R = np.array(orig_coords).reshape((3, 3),axis=1)
+                R = orig_coords.copy() #already in 3x3 shape
+
+                # 3. Create a 90-degree rotation matrix around the Z-axis (Z-axis stays fixed)
+                # Change the angle to np.pi/2 for clockwise or -np.pi/2 for counter-clockwise
+                theta = np.pi / 2 
+                R_rot = np.array([
+                    [np.cos(theta), -np.sin(theta), 0],
+                    [np.sin(theta),  np.cos(theta), 0],
+                    [0, 0, 1],
+                ])
+                # 4. Multiply matrices to get the new orientation
+                R_new = R @ R_rot
+                # 5. Flatten back to 9 coordinates and assign
+                #new_coords = R_new.flatten().tolist()
+                transformed_ori.append(R_new)
+
+        return transformed_ori
+            
+
 
 def add_sensor_layout(mne_object, sensor_layout: OPMSensorLayout):
     """
@@ -107,6 +160,9 @@ if __name__ == "__main__":
     if n_meas_axis == 1:
         print("Using single axis OPMs")
         n_meas_axis_str = "single_axis"
+    elif n_meas_axis == 2: 
+        print("Using dual axis OPMs")
+        n_meas_axis_str = "dual_axis"
     else:
         raise ValueError("Only single axis OPMs supported for now")
 
@@ -143,17 +199,20 @@ if __name__ == "__main__":
     scalp_mesh = pv.PolyData(head_surf["rr"], faces=np.hstack([np.full((len(head_surf["tris"]), 1), 3), head_surf["tris"]]))
     head_surf = inflate_mesh(scalp_mesh, distance=4/1000)
 
-
+    labels = helmet_template.labels*2 if n_meas_axis==2 else helmet_template.labels
     sensor_layout = OPMSensorLayout(
-        labels=helmet_template.labels, 
+        labels=labels,
         depth_mm=[50]*len(helmet_template.labels),
         helmet_template=helmet_template,   
+        n_axis=n_meas_axis
         # delete this line, but useful for plotting as orientation of OPMs (default coil types) are difficult to see on alignment plot
         #coil_type=NamedInt("SQ20950N", 3024)
         ) 
+    #print(sensor_layout.labels)
 
     # rename to match the raw info channel names
-    sensor_layout.labels = [raw.ch_names[i] for i in range(len(helmet_template.labels))]
+    #sensor_layout.labels = [raw.ch_names[i] for i in range(len(helmet_template.labels))]
+    sensor_layout.labels = [raw.ch_names[i] for i in range(len(labels))]
 
     add_sensor_layout(raw, sensor_layout)
 
@@ -178,6 +237,8 @@ if __name__ == "__main__":
         'head', 'mri',
         head_dev_transform(tx, ty, tz, rx, ry, rz)
     )
+
+    head_mri_t.save(fname=path / "data" / "OPM" / f"fsaverage_OPM_head_mri-trans.fif", overwrite=True)
 
 
     # -----------------------------
