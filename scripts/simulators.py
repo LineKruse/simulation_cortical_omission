@@ -17,7 +17,7 @@ from functools import partial
 import os
 
 
-class VolSimulator():
+class Simulator():
 
     def __init__(self):
         self.dir = os.getcwd().replace('/scripts','')
@@ -25,13 +25,15 @@ class VolSimulator():
         #os.chdir(dir)
         pass
 
-    def set_params(self, output_path, sensor_array='squids'):
+    def set_params(self, output_path, sensor_array='squids', n_axis=2):
+        opm_str = 'single' if n_axis==1 else 'dual'
+        
         self.random_state = 42
         self.sensor_array = sensor_array
 
         #Paths 
         self.raw_fname =  os.path.join(self.dir,'data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif')
-        self.raw_opm_info_fname = os.path.join(self.dir, 'data/OPM/fsaverage_OPM_alpha1_single_axis-info.fif')
+        self.raw_opm_info_fname = os.path.join(self.dir, f'data/OPM/fsaverage_OPM_alpha1_{opm_str}_axis-info.fif')
         self.subject = 'fsaverage'
         self.subjects_dir = os.path.join(self.dir, 'data/freesurfer/subjects')
         self.fname_trans = 'fsaverage' #use built-in trans file for fsaverage 
@@ -52,9 +54,11 @@ class VolSimulator():
         if not os.path.exists(self.figure_path):
             os.mkdir(self.figure_path)
 
-        #SRC spacing 
-        self.surf_spacing = 'oct6'
-        self.vol_spacing = 5.0 
+        self.extents_vol = None
+        self.extents_surf = None
+        self.source_labels_vol = None
+        self.source_labels_surf = None
+        self.seeds = dict()
 
 
     def create_info_obj(self):
@@ -67,7 +71,7 @@ class VolSimulator():
             raise ValueError(f'No raw info object available for {self.sensor_array} sensor array')
 
     
-    def data_fun(self, amplitude, latency=0.02):
+    def data_fun(self, amplitude, latency=0):
             """Generate random source time courses.
             #FIXME latency now is relative to the peak of the original wave (i.e., the one used for surf sims)
             #latency should be inputted in s 
@@ -94,7 +98,7 @@ class VolSimulator():
             return(timeseries)
     
 
-    def create_time_series(self, amplitude, latency=0.02):
+    def create_time_series(self, amplitude_surf, amplitude_vol):
 
         #self.tstep = 1.0 / self.info['sfreq']
         self.tstep = 1.0 / 150.15374755859375 #sfreq in mne sample raw.info - used in all sims currently 
@@ -106,8 +110,15 @@ class VolSimulator():
         events[:, 2] = 1  # All events have the sample id.
 
         self.events = events
-        self.source_time_series = self.data_fun(amplitude=amplitude, latency=latency)
 
+        if not amplitude_surf is None: 
+            self.source_time_series_surf = self.data_fun(amplitude=amplitude_surf)
+        else:
+            self.source_time_series_surf = None
+        if not amplitude_vol is None: 
+            self.source_time_series_vol = self.data_fun(amplitude=amplitude_vol, latency=0.02) #will peak 0.02 sec (20 ms) before surface peak 
+        else: 
+            self.source_time_series_vol = None
 
     def generate_src(self, vol_labels, save=True, plot=True, overwrite=True):
         """Generate discrete src with dipole positions inputted as coords in unit 'm' 
@@ -214,27 +225,27 @@ class VolSimulator():
         self.labels_str = "_".join(l for l in vol_labels_lh)
 
         #Save 
+        self.fname_src = f'{self.labels_str}-fsaverage-src.fif'
         if save: 
-            self.fname_src = f'{self.labels_str}-xx_mm-fsaverage-src.fif'
             mne.write_source_spaces(os.path.join(self.output_path, self.fname_src), src_vol, overwrite=overwrite)
 
         #Plot 
         if plot: 
-            fig_name = f'src-{self.labels_str}-xx_mm.png'
+            fig_name = f'src-{self.labels_str}.png'
             fig = mne.viz.plot_bem(src=src_vol, subject=self.subject, subjects_dir=self.subjects_dir, show=False)
             fig.savefig(os.path.join(self.figure_path, fig_name))
             plt.close()
             
 
     def generate_fwd(self, save=True, overwrite=True):
-            self.fwd_fname = f'{self.labels_str}-xx_mm-fsaverage-fwd.fif'
+            self.fwd_fname = f'{self.labels_str}-fsaverage-fwd.fif'
             src = mne.read_source_spaces(os.path.join(self.output_path,self.fname_src))
             self.fwd = mne.make_forward_solution(self.info, self.fname_trans, src, self.fname_bem, mindist=5.0)
             
             if save: 
                 mne.write_forward_solution(os.path.join(self.output_path, self.fwd_fname), self.fwd, overwrite=overwrite)
 
-    def grow_sim_source_label(self, labels, seeds=None, extents=0.5):
+    def grow_sim_source_label(self, labels, seeds=None, extent=2.0, label_type=None):
         """ Find center of mass of labels, and grow a new label includign all vertices wihtin distance (extent).
         Currently based on seed defined as the center of mass of the full region if seed is None. Com can be computed 
         using median or mean of the vertex coords. 
@@ -245,16 +256,41 @@ class VolSimulator():
         """
         from helper_functions import _center_of_mass, grow_labels
 
-        self.extents=extents
+        if label_type=='vol':
+            self.extents_vol = extent
+        elif label_type=='surf':
+            self.extents_surf = extent
+        else: 
+            raise ValueError("label_type must be one of ['vol', 'surf']")
 
         if isinstance(labels, str):
             labels = [labels]
+
 
         #Check that labels are actually in src 
         labs_in_src = [name for name in self.label_vertices.keys()]
         for l in labels: 
             if not l in labs_in_src: 
                 raise KeyError(f"Source label {l} is not present in src")
+            
+        #Check if seed vertex number must be updated (if other labels occur in src[hemi] prior to the surf label)
+        # - As labels vertices are added to the src, they get continuous vertex numbers (so first label added iwth have vertex numbers starting from 0, next label added with have numbers starting from len of first label, etc.)
+        # - Below, when finding the cneter of mass to grow from we are only using the vertices within the specific label of interest,
+        #   hence, the vertex number of the returned seed will be relative to the number of vertices in that label only 
+        # - Thus, if the src of one hemi has more than one label (when simulating two structures), the seed number will only fit if that label was the first one added
+        # - Here, checking whether there are any labels in src occurring before the current label in question, and in that case 
+        #   extracting the number of vertices in those to be added to the seed number later 
+        # - In the case that the current label in question is the only one simulated (only one in src) the seed number will stay the same
+        # - NB: Checking and updating only left hemisphere, as these are the only labels we are simulating 
+        lh_labels = [l for l in labs_in_src if any(m in l.lower() for m in ['lh','left'])]
+        #get idx of current label, i.e., order in which it was added to the src (if not 0, seed vertno must be updated with length of vertices added before this)
+        idx_map = {key: i for i, key in enumerate(self.label_vertices)}
+        idx_label = idx_map.get(labels[0])
+        #loop through all label keys before current label in src, and add the number of vertices together 
+        seed_update=0
+        for i in range(0,idx_label):
+            seed_update =+ len(self.label_vertices[labs_in_src[i]])
+
 
         #Check which hemis are present in labels (and for which to grow labels)
         hemis_in_labels = []
@@ -266,28 +302,32 @@ class VolSimulator():
 
         if not seeds: 
             #Compute center of mass 
-            self.seeds = dict()
             seeds = []
             for l in labels: 
                 seed = _center_of_mass(self.label_vertices[l])
+                seed = seed + seed_update
                 seeds.append(seed)
                 self.seeds[l] = seed
-                
 
         #FIXME - check hwo this works wtih the hemis param - should select hemis and grow label based on hemis indicated in label name 
                 # - also check that it actually matches the extent and label and names pairwise
-        self.labels = grow_labels(
+        source_labels = grow_labels(
             self.fwd['src'], 
             #self.src,
             self.subject,
             seeds=seeds, #one seed per label per hemis
-            extents=extents, #either one value per label, otherwise it will use same extent for each label 
+            extents=extent, #either one value per label, otherwise it will use same extent for each label 
             hemis=hemis_in_labels,
             subjects_dir=self.subjects_dir,
             n_jobs=None,
             names=labels,
             colors=None,
         )
+
+        if label_type == 'vol':
+            self.source_labels_vol = source_labels
+        elif label_type == 'surf':
+            self.source_labels_surf = source_labels
 
 
     def initiate_sourcesimulator(self):        
@@ -297,66 +337,117 @@ class VolSimulator():
     def add_to_sourcesimulator(self, labels="all", save=True, overwrite=True):
         """
         FIXME: edit so that we can specify which source time series to sim for which label 
-        Currently just adding the same generic one to each label 
+        Currently just adding the same generic one to each label of same type (surf or vol)
         """
-        if labels=='all':
-            for label_source in self.labels:
-                self.source_simulator.add_data(label_source, self.source_time_series, self.events)
-        
+        if not self.source_labels_vol is None: 
+            str1 = "-".join([self.source_labels_vol[i].name + f'_{self.extents_vol}_mm' for i, x in enumerate(self.source_labels_vol)])
+        else: 
+            str1 = ""
+        if not self.source_labels_surf is None: 
+            str2 = "-".join([self.source_labels_surf[i].name + f'_{self.extents_surf}_mm' for i, x in enumerate(self.source_labels_surf)])
+        else: 
+            str2 = ""
+        self.stc_fname = f"{str1}-{str2}"
+
+        if labels=="all":
+            if self.source_labels_vol is not None: 
+                for vol_source in self.source_labels_vol: 
+                    print(f"-- Adding volume time series for volume {vol_source}")
+                    self.source_simulator.add_data(vol_source, self.source_time_series_vol, self.events)
+            if self.source_labels_surf is not None: 
+                for surf_source in self.source_labels_surf: 
+                    print(f"--Adding surface time series for cortical region {surf_source}")
+                    self.source_simulator.add_data(surf_source, self.source_time_series_surf, self.events)
+        elif labels=="surf":
+            for surf_source in self.source_labels_surf: 
+                self.source_simulator.add_data(surf_source, self.source_time_series_surf, self.events)
+        elif labels=="vol":
+            for vol_source in self.source_labels_vol: 
+                self.source_simulator.add_data(vol_source, self.source_time_series_vol, self.events)
         else: #only add those provided in input parameter labels 
-            for label_source in self.labels: 
+            self.source_labels_all = [self.source_labels_vol, self.source_labels_surf]
+            for label_source in self.source_labels_all: 
                 if label_source.name in labels: 
-                    self.source_simulator.add_data(label_source, self.source_time_series, self.events)
-        
+                    if label_source.name in self.source_labels_vol: 
+                        self.source_simulator.add_data(label_source, self.source_time_series_vol, self.events)
+                    elif label_source.name in self.source_labels_surf: 
+                        self.source_simulator.add_data(label_source, self.source_time_series_surf, self.events)
+
         if save: 
-            self.stc_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm"
             self.source_simulator.get_stc().save(os.path.join(self.output_path, self.stc_fname), overwrite=overwrite)
 
 
+    def add_eog_no_sphere(self, head_pos=None, interp="cos2",n_jobs=None, verbose=None):
+        from helper_functions import _add_exg_no_sphere
+        return _add_exg_no_sphere(self.raw, "blink", head_pos, interp, n_jobs, self.random_state, self.sensor_array, self.fname_bem)
 
-    def sim_raw(self, add_iir=True, add_eog=True, add_ecg=True, save=True, overwrite=True):
+    def add_ecg_no_sphere(self, head_pos=None, interp="cos2",n_jobs=None, verbose=None):
+        from helper_functions import _add_exg_no_sphere
+        return _add_exg_no_sphere(self.raw, "ecg", head_pos, interp, n_jobs, self.random_state, self.sensor_array, self.fname_bem)
+
+
+    def sim_raw(self, add_iir=True, add_eog=True, add_ecg=True, save=True, overwrite=True, noise_mag=2e-14, noise_grad=5e-13):
 
         picks = mne.pick_types(self.info, meg=True, exclude="bads")
 
         self.raw = mne.simulation.simulate_raw(self.info, self.source_simulator, forward=self.fwd)
         self.raw = self.raw.pick(picks=["meg", "stim"], exclude="bads")
         
-        #FIXME currently have no cov matrix for OPM sensory arrays, running without added noise 
-        if self.fname_cov is None: 
-            noise_std = 40e-15 #currently usign 40 Ft noise level for OPM (suggsted in some places, unsure if they refer to the same thing)
-            noise_cov = mne.make_ad_hoc_cov(self.raw.info, std=noise_std) # default noise value is 20 fT for magnetometers 
+        if self.sensor_array=='opm': 
+            self.noise_std = dict({'mag':noise_mag}) #currently usign 40 Ft noise level for OPM (suggsted in some places, unsure if they refer to the same thing)
+        elif self.sensor_array=='squids':
+            if noise_mag is None:  
+                self.noise_std=dict({'grad':None, 'mag':None}) #default in MNE, 5fT/sqr(Hz) for grads, 20fT/sqr(Hz) for mags
+            else: 
+                self.noise_std=dict({'grad':noise_grad, 'mag':noise_mag}) #default in MNE, 5fT/sqr(Hz) for grads, 20fT/sqr(Hz) for mags
         else: 
-            noise_cov = mne.read_cov(self.fname_cov)
+            raise ValueError(f'Sensor array {self.sensor_array} is not supported for simulations')
+
+        noise_std_str = ''
+        for key in self.noise_std.keys(): 
+            if key=='mag':
+                noise_std_str+='_'+str(key)+f'_{self.noise_std[key]}'
+            else: 
+                noise_std_str+=str(key)+f'_{self.noise_std[key]}'
+        self.noise_std_str = noise_std_str
 
         if add_iir: #FIXME only works for SQUID sims right now, as it computes iir filter based on mne sample data 
             iir_filter = mne.time_frequency.fit_iir_model_raw(self.sample_raw, order=5, picks=picks, tmin=60, tmax=180)[1]
         else: 
             iir_filter = None 
-        
-        mne.simulation.add_noise(
-            self.raw, cov=noise_cov, iir_filter=None, random_state=self.random_state
-        )
+
+        if noise_mag is not None: 
+            self.noise_cov = mne.make_ad_hoc_cov(self.raw.info, std=self.noise_std)
+            mne.simulation.add_noise(
+                self.raw, cov=self.noise_cov, iir_filter=None, random_state=self.random_state
+            )
+        else:
+            self.noise_cov = None
 
         if add_eog: 
-            mne.simulation.add_eog(self.raw, random_state=self.random_state)
+            #mne.simulation.add_eog(self.raw, random_state=self.random_state)
+            self.add_eog_no_sphere(head_pos=None, interp="cos2",n_jobs=None, verbose=None)
         if add_ecg: 
-            mne.simulation.add_ecg(self.raw, random_state=self.random_state)
+            #mne.simulation.add_ecg(self.raw, random_state=self.random_state)
+            self.add_ecg_no_sphere(head_pos=None, interp="cos2",n_jobs=None, verbose=None)
         
         if save: 
-            self.raw_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm-raw.fif"
+            self.raw_fname = f"{self.stc_fname}-raw.fif"
             self.raw.save(os.path.join(self.output_path, self.raw_fname), overwrite=overwrite)
 
 
-
     def compute_evoked(self, save=True, overwrite=True):
-        tmax = (len(self.source_time_series) - 1) * self.tstep
+        if self.source_labels_vol is not None: 
+            tmax = (len(self.source_time_series_vol) - 1) * self.tstep
+        elif self.source_labels_surf is not None: 
+            tmax = (len(self.source_time_series_surf) - 1) * self.tstep
         tmin = -0.2
         self.epochs = mne.Epochs(self.raw, self.events, 1, tmin=tmin, tmax=tmax, baseline=(None, 0))
         self.evoked = self.epochs.average()
 
         if save: 
-            self.epochs_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm-epo.fif"
-            self.evoked_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm-ave.fif"
+            self.epochs_fname = f"{self.stc_fname}-epo.fif"
+            self.evoked_fname = f"{self.stc_fname}-ave.fif"
             self.epochs.save(os.path.join(self.output_path, self.epochs_fname), overwrite=overwrite)
             self.evoked.save(os.path.join(self.output_path, self.evoked_fname), overwrite=overwrite)
 
@@ -411,9 +502,13 @@ class VolSimulator():
         mne.viz.set_3d_view(figure=fig, azimuth=180, distance=1, focalpoint="auto")
     
     def plot_time_series(self, save=True, show=True):
-        plt.plot(np.arange(0,len(self.source_time_series)*self.tstep, self.tstep), self.source_time_series)
+        if self.source_labels_vol is not None: 
+            plt.plot(np.arange(0,len(self.source_time_series_vol)*self.tstep, self.tstep), self.source_time_series_vol, color='darkred', label="Thalamus")
+        if self.source_labels_surf is not None: 
+            plt.plot(np.arange(0,len(self.source_time_series_surf)*self.tstep, self.tstep), self.source_time_series_surf, color='darkgreen', label="Occipital")
         plt.xlabel("Time (S)")
         plt.ylabel("Amplitude (nAm)")
+        plt.legend()
         if save: 
             plt.savefig(os.path.join(self.figure_path, f"time_series_sim_{self.amp_nA}_nA.png"))
         if show: 
@@ -423,21 +518,81 @@ class VolSimulator():
     def plot_raw(self, save=True, show=True):
         self.raw.plot(show=show)
         if save: 
-            plt.savefig(os.path.join(self.figure_path, f'raw_{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm.png'))
+            plt.savefig(os.path.join(self.figure_path, f'raw_{self.stc_fname}.png'))
+        plt.close()
+    
+    def plot_added_noise(self, save=True, show=True):
+        """
+        Plotting ECG evokeds, ICA components for EOG and ECG artefacts and noise cov matrix 
+        """
+        import seaborn as sns
+
+        #Noise cov 
+        if self.noise_cov is not None: 
+            noise_cov_mat = np.diag(self.noise_cov.data)
+            plt.figure()
+            sns.heatmap(noise_cov_mat)
+            plt.suptitle(f"Sensor array: {self.sensor_array}, noise diag std: {self.noise_std}")
+            if save: 
+                plt.savefig(os.path.join(self.figure_path, f"added_noise_cov_{self.stc_fname}.png"))
+            if show: 
+                plt.show()
+            plt.close()
+
+        #Isolate ECG artefacts and plot topo 
+        ecg_evoked = mne.preprocessing.create_ecg_epochs(self.raw).average()
+        ecg_evoked.apply_baseline(baseline=(None, -0.2))
+
+        fig = ecg_evoked.plot_joint(picks='mag', show=show)
+        if save: 
+            fig.savefig(os.path.join(self.figure_path, 'added_ecg_evoked_mag.png'))
+            plt.close()
+        if self.sensor_array=='squids': # grads only present in squid sims 
+            fig = ecg_evoked.plot_joint(picks='grad', show=show)
+            if save: 
+                fig.savefig(os.path.join(self.figure_path, 'added_ecg_evoked_grad.png'))
+                plt.close()
+
+        #Run and plot ICA 
+        ica = mne.preprocessing.ICA(n_components=15, random_state=97)
+        ica.fit(self.raw, reject=dict(eeg=200e-6))
+
+        fig = ica.plot_sources(self.raw, show_scrollbars=True, show=show) #looks like ICA000 is EOG, ICA001 is ECG
+        if save: 
+            fig.savefig(os.path.join(self.figure_path, 'added_ecg_eog_ica_sources.png'))
+            plt.close()
+        fig = ica.plot_components(show=show)
+        if save: 
+            fig.savefig(os.path.join(self.figure_path, 'added_ecg_eog_ica_components.png'))
+            plt.close()
+        fig = ica.plot_properties(self.raw, picks=0, show=show)
+        if save: 
+            fig[0].savefig(os.path.join(self.figure_path, 'added_ecg_eog_ica_properties_00.png'))
+            plt.close()
+        fig = ica.plot_properties(self.raw, picks=1, show=show)
+        if save: 
+            fig[0].savefig(os.path.join(self.figure_path, 'added_ecg_eog_ica_properties_01.png'))
             plt.close()
 
     
     def plot_raw_psd(self, save=True, show=True):
-        self.raw.compute_psd().plot(show=show)
+        spectrum = self.raw.compute_psd()
+        fig = spectrum.plot(show=show)
         if save: 
-            plt.savefig(os.path.join(self.figure_path, f"raw_psd_{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm"))
+            fig.savefig(os.path.join(self.figure_path, f"raw_psd_{self.stc_fname}.png"))
+            plt.close()
+
+        #plot noise level 
+        fig = spectrum.plot(dB=False, average=True, amplitude=True,show=show)
+        if save: 
+            fig.savefig(os.path.join(self.figure_path, f"raw_noise_level_{self.stc_fname}.png"))
             plt.close()
     
-    def plot_evoked_psd(self, save=False, show=True):
+    def plot_evoked_psd(self, save=True, show=True):
         plt.figure()
         plt.psd(self.evoked.data[0])
         if save: 
-            plt.savefig(os.path.join(self.figure_path, f"evoked_psd_{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm"))
+            plt.savefig(os.path.join(self.figure_path, f"evoked_psd_{self.stc_fname}"))
         if show: 
             plt.show()
         plt.close()
@@ -449,278 +604,13 @@ class VolSimulator():
     def plot_joint(self, picks, save=True, show=True):
         fig = self.evoked.plot_joint(picks=picks, show=show, times=[0.075, 0.18])
         if save: 
-            fig.savefig(os.path.join(self.figure_path, f"evoked_joint-{self.labels_str}-{self.amp_nA}_nA-{self.extents}_mm-{picks}.png"))
+            fig.savefig(os.path.join(self.figure_path, f"evoked_joint-{self.stc_fname}{picks}.png"))
             plt.close()
     
 
 
-class SurfSimulator():
 
-    def __init__(self):
-        pass
-
-    def set_params(self, output_path):
-        self.random_state = 42
-
-        #Paths 
-        self.raw_fname =  '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis_filt-0-40_raw.fif'
-        self.subject = 'fsaverage'
-        self.subjects_dir = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/freesurfer/subjects'
-        self.fname_trans = 'fsaverage' #use built-in trans file for fsaverage 
-        self.fname_bem = os.path.join(self.subjects_dir, self.subject, 'bem','fsaverage-5120-5120-5120-bem-sol.fif')
-        self.fname_aseg = '/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/freesurfer/fsaverage/mri/aparc+aseg.mgz'
-        self.fname_cov = os.path.join('/Users/au553087/Library/CloudStorage/OneDrive-Aarhusuniversitet/Work/RCB/simulation_study/simulation_cortical_omission/data/MNE-sample-data/MEG/sample/sample_audvis-cov.fif')
-        self.output_path = output_path
-        self.figure_path = os.path.join(output_path, 'figures')
-
-        if not os.path.exists(self.output_path):
-            os.mkdir(self.output_path)
-        if not os.path.exists(self.figure_path):
-            os.mkdir(self.figure_path)
-
-        #SRC spacing 
-        self.surf_spacing = 'oct6'
-
-    def create_info_obj(self):
-        self.sample_raw = mne.io.read_raw_fif(self.raw_fname)
-        self.info = self.sample_raw.pick(picks=['meg']).info
-    
-    def data_fun(self, amplitude):
-            """Generate random source time courses."""
-            rng = np.random.RandomState(42)
-            self.amp_nA = amplitude 
-            amp = amplitude*1e-9
-            return (
-                amp #50e-9 = 50 nAm
-                * np.sin(20.0 * self.times)
-                * np.exp(-((self.times - 0.15 + 0.05 * rng.randn(1)) ** 2) / 0.01)
-            )
-
-    def create_time_series(self, amplitude=5.0):
-
-        self.tstep = 1.0 / self.info['sfreq']
-        self.times = np.arange(100, dtype=np.float64)*self.tstep
-
-        n_events = 100
-        events = np.zeros((n_events, 3), int)
-        events[:, 0] = 200 * np.arange(n_events)  # Events sample.
-        events[:, 2] = 1  # All events have the sample id.
-
-        self.events = events
-        self.source_time_series = self.data_fun(amplitude=amplitude)
-
-
-    def generate_src(self, save=True, plot=True, overwrite=True):
-        self.src = mne.setup_source_space(self.subject, spacing=self.surf_spacing, add_dist="patch", subjects_dir=self.subjects_dir) 
-            
-        #Save 
-        if save: 
-            self.fname_src = f'surface-{self.surf_spacing}_mm-fsaverage-src.fif'
-            mne.write_source_spaces(os.path.join(self.output_path, self.fname_src), self.src, overwrite=overwrite)
-
-        #Plot 
-        if plot: 
-            fig = mne.viz.plot_bem(src=self.src, subject=self.subject, subjects_dir=self.subjects_dir, show=False)
-            fig.savefig(os.path.join(self.figure_path, f'src_surf_{self.surf_spacing}_mm.png'))
-            plt.close()
-    
-            
-    def generate_fwd(self, types=['surf','vol','discrete'], inuse=True, save=True):
-        self.fwd = mne.make_forward_solution(self.info, self.fname_trans, self.src, self.fname_bem, mindist=5.0)
-
-        if save: 
-            self.fwd_fname = f'surface-{self.surf_spacing}_mm_fsaverage-fwd.fif'
-            mne.write_forward_solution(os.path.join(self.output_path, self.fwd_fname), self.fwd, overwrite=True)
-    
-
-    def grow_sim_source_label(self, label_regex='lateraloccipital-lh', location='center', extent=5.0):
-        
-        self.extent=extent
-
-        if isinstance(label_regex, str):
-            label_regex = [label_regex]
-        
-        self.selected_labels = []
-        self.source_labels = []
-        
-        for l in label_regex: 
-            self.selected_labels.append(mne.read_labels_from_annot(
-                self.subject, regexp=l, subjects_dir=self.subjects_dir
-            )[0])
-
-        for source in self.selected_labels: 
-            self.source_labels.append(mne.label.select_sources(
-                self.subject, 
-                source,
-                location=location, #uses center of mass (CoM) of provided label as seed 
-                extent=extent, 
-                grow_outside=False,
-                subjects_dir=self.subjects_dir,
-                name = source.name,
-                random_state=self.random_state
-            ))
-
-    def initiate_sourcesimulator(self):
-        self.source_simulator = mne.simulation.SourceSimulator(self.fwd['src'], tstep=self.tstep)
-
-    
-    def add_to_sourcesimulator(self, labels="all", save=True, overwrite=True):
-        """
-        FIXME: edit so that we can specify which source time series to sim for which label 
-        Currently just adding the same generic one to each label 
-        """
-        labs_used = []
-
-        if labels=='all':
-            for label_source in self.source_labels:
-                self.source_simulator.add_data(label_source, self.source_time_series, self.events)
-                labs_used.append(label_source.name)
-        
-        else: #only add those provided in input parameter labels 
-            for label_source in self.source_labels: 
-                if label_source.name in labels: 
-                    self.source_simulator.add_data(label_source, self.source_time_series, self.events)
-                    labs_used.append(label_source.name)
-        
-        if save: 
-            self.labels_str = "_".join(l for l in labs_used)
-            self.stc_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm"
-            self.source_simulator.get_stc().save(os.path.join(self.output_path, self.stc_fname), overwrite=overwrite)
-
-
-    def sim_raw(self, add_iir=True, add_eog=True, add_ecg=True, save=True, overwrite=True):
-
-            picks = mne.pick_types(self.info, meg=True, exclude="bads")
-
-            self.raw = mne.simulation.simulate_raw(self.info, self.source_simulator, forward=self.fwd)
-            self.raw = self.raw.pick(picks=["meg", "stim"], exclude="bads")
-
-            noise_cov = mne.read_cov(self.fname_cov)
-
-            if add_iir: 
-                iir_filter = mne.time_frequency.fit_iir_model_raw(self.sample_raw, order=5, picks=picks, tmin=60, tmax=180)[1]
-                mne.simulation.add_noise(
-                    self.raw, cov=noise_cov, iir_filter=iir_filter, random_state=self.random_state
-                )
-            else: 
-                mne.simulation.add_noise(
-                    self.raw, cov=noise_cov, iir_filter=None, random_state=self.random_state
-                )
-            if add_eog: 
-                mne.simulation.add_eog(self.raw, random_state=self.random_state)
-            if add_ecg: 
-                mne.simulation.add_ecg(self.raw, random_state=self.random_state)
-            
-            if save: 
-                self.raw_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm-raw.fif"
-                self.raw.save(os.path.join(self.output_path, self.raw_fname), overwrite=overwrite)
-
-
-
-    def compute_evoked(self, save=True, overwrite=True):
-        tmax = (len(self.source_time_series) - 1) * self.tstep
-        tmin=-0.2
-        self.epochs = mne.Epochs(self.raw, self.events, 1, tmin=tmin, tmax=tmax, baseline=(None, 0))
-        self.evoked = self.epochs.average()
-
-        if save: 
-            self.epochs_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm-epo.fif"
-            self.evoked_fname = f"{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm-ave.fif"
-            self.epochs.save(os.path.join(self.output_path, self.epochs_fname), overwrite=overwrite)
-            self.evoked.save(os.path.join(self.output_path, self.evoked_fname), overwrite=overwrite)
-
-    
-    def plot_stc(self, surface='inflated', hemi='lh'):
-
-        stc = self.source_simulator.get_stc()
-        stc_cropped = self.source_simulator.get_stc(
-            start_sample=0, stop_sample=len(self.source_time_series)
-        )
-
-        """ #THIS PLOT ONLY works for surface srcs (as it requires triangular mesh (tris) in src, which vol or discrete srcs don't have)
-        mne.viz.plot_sparse_source_estimates(
-            fwd["src"], stc_cropped, bgcolor=(1, 1, 1), opacity=0.5, high_resolution=True
-        )
-
-        #DOES NOT WORK because stc is not of type VolSourceEstimate 
-        mne.viz.plot_volume_source_estimates(
-            stc_cropped, fwd['src'], subject='fsaverage', subjects_dir=subjects_dir, mode='glass_brain'
-        ) """
-
-        mne.viz.plot_source_estimates(
-            stc_cropped, subject=self.subject, subjects_dir=self.subjects_dir, surface=surface, hemi=hemi, src=self.fwd['src'],
-            alpha=0.2, 
-        )       
-
-
-    def plot_fwd_with_sources(self, surface='white'):
-        
-        fwd = mne.read_forward_solution(os.path.join(self.output_path, self.fwd_fname))
-            
-        fig = mne.viz.create_3d_figure(size=(600, 400))
-        # Plot the cortex
-        mne.viz.plot_alignment(
-            subject=self.subject,
-            subjects_dir=self.subjects_dir,
-            trans=self.fname_trans,
-            surfaces=surface,
-            coord_frame="mri",
-            fig=fig,
-        )
-        # Show the three dipoles defined at each location in the source space
-        mne.viz.plot_alignment(
-            subject=self.subject,
-            subjects_dir=self.subjects_dir,
-            trans=self.fname_trans,
-            fwd=fwd,
-            surfaces=surface,
-            coord_frame="mri",
-            fig=fig,
-        )
-        mne.viz.set_3d_view(figure=fig, azimuth=180, distance=1, focalpoint="auto")
-    
-    def plot_time_series(self, save=True, show=True):
-        plt.plot(np.arange(0,len(self.source_time_series)*self.tstep, self.tstep), self.source_time_series)
-        plt.xlabel("Time (S)")
-        plt.ylabel("Amplitude (nAm)")
-        if save: 
-            plt.savefig(os.path.join(self.figure_path, f"time_series_sim_{self.amp_nA}.png"))
-        if show: 
-            plt.show()
-        plt.close()
-    
-    def plot_raw(self, save=False, show=True):
-        self.raw.plot(show=show)
-        if save: 
-            plt.savefig(os.path.join(self.figure_path, f'raw_{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm.png'))
-            plt.close()
-        
-    
-    def plot_raw_psd(self, save=False, show=True):
-        self.raw.compute_psd().plot(show=show)
-        if save: 
-            plt.savefig(os.path.join(self.figure_path, f"raw_psd_{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm.png"))
-            plt.close()
-    
-    def plot_evoked_psd(self, save=True, show=True):
-        plt.figure()
-        plt.psd(self.evoked.data[0])
-        if save: 
-            plt.savefig(os.path.join(self.figure_path, f"evoked_psd_{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm.png"))
-        if show: 
-            plt.show()
-        plt.close()
-
-    def plot_evoked(self, save=True):
-        self.evoked.plot(time_unit="s")
-    
-    def plot_joint(self, picks, save=True, show=True):
-        fig = self.evoked.plot_joint(picks=picks, show=show, times=[0.095,0.2])
-        if save: 
-            fig.savefig(os.path.join(self.figure_path, f"evoked_joint_{self.labels_str}-{self.amp_nA}_nA-{self.extent}_mm-{picks}.png"))
-            plt.close()
-
-
+""" 
 class MixSimulator():
 
     def __init__(self):
@@ -975,7 +865,7 @@ class MixSimulator():
             if save: 
                 mne.write_forward_solution(os.path.join(self.output_path, self.fwd_fname), self.fwd, overwrite=overwrite)
 
-    def grow_sim_source_label_vol(self, labels, seeds=None, extents=0.5):
+    def grow_sim_source_label_vol(self, labels, seeds=None, extents=2.0):
         """ Find center of mass of labels, and grow a new label includign all vertices wihtin distance (extent).
         Currently based on seed defined as the center of mass of the full region if seed is None. Com can be computed 
         using median or mean of the vertex coords. 
@@ -1275,3 +1165,4 @@ class MixSimulator():
             plt.show()
         plt.close()
     
+ """

@@ -449,6 +449,590 @@ def compute_RLE(stc_true, stc_est, src_sim, src_recon, threshold="90%", per_samp
             return(np.inf)
 
 
+def _add_exg_no_sphere(raw, kind, head_pos, interp, n_jobs, random_state, sensor_array, bem_fname):
+    from mne.utils.check import _validate_type, _check_preload, check_random_state
+    from mne.io.base import BaseRaw
+    from mne.simulation.raw import _check_head_pos, _log_ch, _SimForwards
+    from mne.source_space._source_space import setup_volume_source_space
+    from mne._ola import _Interp2
+    from mne.bem import fit_sphere_to_headshape
+
+    #--------- from add_exg() function ----# 
+    assert isinstance(kind, str) and kind in ("ecg","blink")
+    _validate_type(raw, BaseRaw, "raw")
+    _check_preload(raw, f"Adding {kind} noise")
+    rng = check_random_state(random_state)
+    info, times, first_samp = raw.info, raw.times, raw.first_samp
+    data = raw._data
+    meg_picks = mne.pick_types(info, meg=True, eeg=False, exclude=())
+    meeg_picks = mne.pick_types(info, meg=True, eeg=True, exclude=())
+
+    #Modified bit - using fsaverage bem instead of fitting a sphere model, and inputting eye dipole positions directly 
+    bem = mne.read_bem_solution(bem_fname)
+    if sensor_array=='squids':
+        trans_fname = "/Volumes/Elements/simulation_cortical_omission/data/freesurfer/subjects/fsaverage/bem/fsaverage-trans.fif"
+    elif sensor_array=='opm':
+        trans_fname = "/Volumes/Elements/simulation_cortical_omission/data/OPM/fsaverage_OPM_head_mri-trans.fif"
+    trans = mne.read_trans(trans_fname)
+    # -- NB! Doesn't matter which (head->mri or mri->head) transform you give it, it will automatically convert 
+    # it to mri-> head using the _get_trans() function, if input is head-> mri 
+    dev_head_ts, offsets = _check_head_pos(head_pos, info, first_samp, times)
+
+    if kind=="blink": #EOG  
+        #Add two eye dipoles (LK manually fitted them to these positions)
+        exg_rr = np.array([[0.026,  0.070,   -0.043], [-0.024,  0.070,  -0.043]])
+
+        # oriented upward
+        nn = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]])
+        # Blink times drawn from an inhomogeneous poisson process
+        # by 1) creating the rate and 2) pulling random numbers
+        blink_rate = (1 + np.cos(2 * np.pi * 1.0 / 60.0 * times)) / 2.0
+        blink_rate *= 12.5 / 60.0
+        blink_rate += 4.5 / 60.0
+        blink_data = rng.uniform(size=len(times)) < blink_rate / info["sfreq"]
+        blink_data = blink_data * (rng.uniform(size=len(times)) + 0.5)  # amps
+        # Activation kernel is a simple hanning window
+        blink_kernel = np.hanning(int(0.25 * info["sfreq"]))
+        exg_data = np.convolve(blink_data, blink_kernel, "same")[np.newaxis, :] * 1e-7
+        # Add rescaled noisy data to EOG ch
+        ch = mne.pick_types(info, meg=False, eeg=False, eog=True)
+        picks = meeg_picks
+        del blink_kernel, blink_rate, blink_data
+    
+    else: #ECG 
+        if len(meg_picks) == 0:
+            raise RuntimeError(
+                "Can only add ECG artifacts if MEG data channels are present"
+            )
+        
+        R, r0 = fit_sphere_to_headshape(info, units="m", verbose=False)[:2]
+        head_radius = R if kind == "blink" else None
+
+        exg_rr = np.array([[-R, 0, -3 * R]])
+        max_beats = int(np.ceil(times[-1] * 80.0 / 60.0))
+        # activation times with intervals drawn from a uniform distribution
+        # based on activation rates between 40 and 80 beats per minute
+        cardiac_idx = np.cumsum(
+            rng.uniform(60.0 / 80.0, 60.0 / 40.0, max_beats) * info["sfreq"]
+        ).astype(int)
+        cardiac_idx = cardiac_idx[cardiac_idx < len(times)]
+        cardiac_data = np.zeros(len(times))
+        cardiac_data[cardiac_idx] = 1
+        # kernel is the sum of three hanning windows
+        cardiac_kernel = np.concatenate(
+            [
+                2 * np.hanning(int(0.04 * info["sfreq"])),
+                -0.3 * np.hanning(int(0.05 * info["sfreq"])),
+                0.2 * np.hanning(int(0.26 * info["sfreq"])),
+            ],
+            axis=-1,
+        )
+        exg_data = (
+            np.convolve(cardiac_data, cardiac_kernel, "same")[np.newaxis, :] * 15e-8
+        )
+        # Add rescaled noisy data to ECG chs
+        ch = mne.pick_types(info, meg=False, eeg=False, ecg=True)
+        picks = meg_picks
+        del cardiac_data, cardiac_kernel, max_beats, cardiac_idx
+        nn = np.zeros_like(exg_rr)
+        nn[:, 0] = 1  # arbitrarily rightward
+
+    del meg_picks, meeg_picks
+    noise = rng.standard_normal(exg_data.shape[1]) * 5e-6
+    if len(ch) >= 1:
+        ch = ch[-1]
+        data[ch, :] = exg_data * 1e3 + noise
+    else:
+        ch = None
+
+    src = setup_volume_source_space(pos=dict(rr=exg_rr, nn=nn), sphere_units="mm", bem=bem)
+    print(f"{kind} simulated and trace", info, ch)
+    del ch, nn, noise
+
+    ## find me 
+    used = np.zeros(len(raw.times), bool)
+    mindist = 0.005 #original mindist used by the add_exg function 
+    #mindist = 0.0 #gives me the same error even if mindist is 0 mm 
+    get_fwd = _SimForwards_LK(
+        dev_head_ts, offsets, info, trans, src, bem, mindist, n_jobs, picks
+    )
+    interper = _Interp2(offsets, get_fwd, interp)
+    proc_lims = np.concatenate([np.arange(0, len(used), 10000), [len(used)]])
+
+    for start, stop in zip(proc_lims[:-1], proc_lims[1:]):
+        fwd, _ = interper.feed(stop - start)
+        data[picks, start:stop] += np.einsum("svt,vt->st", fwd, exg_data[:, start:stop])
+        assert not used[start:stop].any()
+        used[start:stop] = True
+    assert used.all()
+
+### Modified _SimForwards class 
+# - Calls modified _iter_forward_solutions() 
+class _SimForwards_LK:
+    def __init__(
+        self,
+        dev_head_ts,
+        offsets,
+        info,
+        trans,
+        src,
+        bem,
+        mindist,
+        n_jobs,
+        meeg_picks,
+        forward=None,
+        use_cps=True,
+    ):
+        self.idx = 0
+        self.offsets = offsets
+        self.use_cps = use_cps
+        self.iter = iter(
+            _iter_forward_solutions_LK(
+                info, trans, src, bem, dev_head_ts, mindist, n_jobs, forward, meeg_picks
+            )
+        )
+
+    def __call__(self, offset):
+        from mne.forward.forward import convert_forward_solution
+        assert self.offsets[self.idx] == offset
+        self.idx += 1
+        fwd = next(self.iter)
+        self.src = fwd["src"]
+        # XXX eventually we could speed this up by allowing the forward
+        # solution code to only compute the normal direction
+        convert_forward_solution(
+            fwd,
+            surf_ori=True,
+            force_fixed=True,
+            use_cps=self.use_cps,
+            copy=False,
+            verbose=False,
+        )
+        return fwd["sol"]["data"], np.array(self.idx, float)
+
+###----- Modified version of _iter_forward_solutions ------#
+# - Calls modified version of _prepare_for_forward
+def _iter_forward_solutions_LK(
+    info, trans, src, bem, dev_head_ts, mindist, n_jobs, forward, picks
+):
+    """Calculate a forward solution for a subject."""
+
+    from mne._fiff.pick import pick_info, pick_channels_forward
+    from mne._fiff.constants import FIFF
+    from mne.transforms import _get_trans, transform_surface_to
+    from mne.forward._compute_forward import _compute_forwards
+    from mne.forward._make_forward import _to_forward_dict, _transform_orig_meg_coils
+    from mne.surface import _CheckInside
+    from mne.forward import _merge_fwds
+    from mne.utils._logging import _verbose_safe_false
+
+
+    print("Setting up forward solutions")
+    info = pick_info(info, picks)
+    with info._unlock():
+        info.update(projs=[], bads=[])  # Ensure no 'projs' or 'bads'
+    mri_head_t, trans = _get_trans(trans)
+    sensors, rr, info, update_kwargs, bem = _prepare_for_forward_LK(
+        src,
+        mri_head_t,
+        info,
+        bem,
+        mindist,
+        n_jobs,
+        allow_bem_none=True,
+        verbose=_verbose_safe_false(),
+    )
+    del (src, mindist)
+
+    eegnames = sensors.get("eeg", dict()).get("ch_names", [])
+    if not len(eegnames):
+        eegfwd = None
+    elif forward is not None:
+        eegfwd = pick_channels_forward(forward, eegnames, verbose=False)
+    else:
+        eegels = sensors.get("eeg", dict()).get("defs", [])
+        this_sensors = dict(eeg=dict(ch_names=eegnames, defs=eegels))
+        eegfwd = _compute_forwards(
+            rr, bem=bem, sensors=this_sensors, n_jobs=n_jobs, verbose=False
+        )["eeg"]
+        eegfwd = _to_forward_dict(eegfwd, eegnames)
+        del eegels
+    del eegnames
+
+    # short circuit here if there are no MEG channels (don't need to iterate)
+    if "meg" not in sensors:
+        eegfwd.update(**update_kwargs)
+        for _ in dev_head_ts:
+            yield eegfwd
+        yield eegfwd
+        return
+
+    coord_frame = FIFF.FIFFV_COORD_HEAD
+    if bem is not None and not bem["is_sphere"]:
+        idx = np.where(
+            np.array([s["id"] for s in bem["surfs"]]) == FIFF.FIFFV_BEM_SURF_ID_BRAIN
+        )[0]
+        assert len(idx) == 1
+        # make a copy so it isn't mangled in use
+        bem_surf = transform_surface_to(
+            bem["surfs"][idx[0]], coord_frame, mri_head_t, copy=True
+        )
+    megcoils = sensors["meg"]["defs"]
+    if "eeg" in sensors:
+        del sensors["eeg"]
+    megnames = sensors["meg"]["ch_names"]
+    fwds = dict()
+    if eegfwd is not None:
+        fwds["eeg"] = eegfwd
+    del eegfwd
+    for ti, dev_head_t in enumerate(dev_head_ts):
+        # Could be *slightly* more efficient not to do this N times,
+        # but the cost here is tiny compared to actual fwd calculation
+        print(f"Computing gain matrix for transform #{ti + 1}/{len(dev_head_ts)}")
+        _transform_orig_meg_coils(megcoils, dev_head_t)
+
+        # Make sure our sensors are all outside our BEM
+        coil_rr = np.array([coil["r0"] for coil in megcoils])
+
+        # Compute forward
+        if forward is None:
+            if not bem["is_sphere"]:
+                outside = ~_CheckInside(bem_surf)(coil_rr, n_jobs=n_jobs, verbose=False)
+            elif bem.radius is not None:
+                d = coil_rr - bem["r0"]
+                outside = np.sqrt(np.sum(d * d, axis=1)) > bem.radius
+            else:  # only r0 provided
+                outside = np.ones(len(coil_rr), bool)
+            if not outside.all():
+                raise RuntimeError(
+                    f"{np.sum(~outside)} MEG sensors collided with inner skull "
+                    f"surface for transform {ti}"
+                )
+            megfwd = _compute_forwards(
+                rr, sensors=sensors, bem=bem, n_jobs=n_jobs, verbose=False
+            )["meg"]
+            megfwd = _to_forward_dict(megfwd, megnames)
+        else:
+            megfwd = pick_channels_forward(forward, megnames, verbose=False)
+        fwds["meg"] = megfwd
+        fwd = _merge_fwds(fwds, verbose=False)
+        fwd.update(**update_kwargs)
+
+        yield fwd
+    # need an extra one to fill last buffer
+    yield fwd
+
+#### ----- Modified version of _prepare_for_forward ------ ####
+# - Calls modified version of _filter_source_space
+
+def _prepare_for_forward_LK(
+    src,
+    mri_head_t,
+    info,
+    bem,
+    mindist,
+    n_jobs,
+    *,
+    bem_extra="",
+    trans="",
+    info_extra="",
+    meg=True,
+    eeg=True,
+    ignore_ref=False,
+    allow_bem_none=False,
+    on_inside="raise",
+    verbose=None,
+):
+    """Prepare for forward computation.
+
+    The sensors dict contains keys for each sensor type, e.g. 'meg', 'eeg'.
+    The vale for each of these is a dict that comes from _prep_meg_channels or
+    _prep_eeg_channels. Each dict contains:
+
+    - defs : a list of dicts (one per channel) with 'rmag', 'cosmag', etc.
+    - ch_names: a list of str channel names corresponding to the defs
+    - compensator (optional): the ndarray compensation matrix to apply
+    - post_picks (optional): the ndarray of indices to pick after applying the
+      compensator
+    """
+    from mne.utils._logging import logger
+    from mne.source_space._source_space import _ensure_src
+    from mne.transforms import _print_coord_trans, invert_transform
+    from mne._fiff.pick import pick_types, pick_info 
+    from mne.forward._make_forward import _prep_meg_channels, _prep_eeg_channels, _setup_bem
+    from mne.surface import _CheckInside, _CheckInsideSphere
+    from mne.bem import _bem_find_surface
+    from mne.channels.montage import apply_trans
+    from mne.utils.check import _on_missing
+    from pathlib import Path
+    from mne._fiff.meas_info import Info
+    from mne.transforms import _coord_frame_name
+
+    ### Modifed by LK 
+    #wdir = "/Volumes/Elements/simulation_cortical_omission/scripts"
+    ###
+
+    # Read the source locations
+    logger.info("")
+    # let's make a copy in case we modify something
+    src = _ensure_src(src).copy()
+    nsource = sum(s["nuse"] for s in src)
+    if len(src) and nsource == 0:
+        raise RuntimeError(
+            "No sources are active in these source spaces. "
+            '"do_all" option should be used.'
+        )
+    logger.info(
+        "Read %d source spaces a total of %d active source locations", len(src), nsource
+    )
+    # Delete some keys to clean up the source space:
+    for key in ["working_dir", "command_line"]:
+        if key in src.info:
+            del src.info[key]
+
+    # Read the MRI -> head coordinate transformation
+    logger.info("")
+    _print_coord_trans(mri_head_t)
+
+    # make a new dict with the relevant information
+    arg_list = [info_extra, trans, src, bem_extra, meg, eeg, mindist, n_jobs, verbose]
+    cmd = f"make_forward_solution({', '.join(str(a) for a in arg_list)})"
+    mri_id = dict(machid=np.zeros(2, np.int32), version=0, secs=0, usecs=0)
+
+    info_trans = str(trans) if isinstance(trans, Path) else trans
+    kwargs_fwd_info = dict(
+        chs=info["chs"],
+        comps=info["comps"],
+        dev_head_t=info["dev_head_t"],
+        mri_file=info_trans,
+        mri_id=mri_id,
+        meas_file=info_extra,
+        meas_id=None,
+        working_dir=os.getcwd(),
+        #working_dir = wdir, #Modified by LK 
+        command_line=cmd,
+        bads=info["bads"],
+        mri_head_t=mri_head_t,
+    )
+
+    if "kit_system_id" in info:
+        kwargs_fwd_info["kit_system_id"] = info["kit_system_id"]
+
+    info = Info(**kwargs_fwd_info)
+    info._update_redundant()
+    info._check_consistency()
+    logger.info("")
+
+    sensors = dict()
+    if meg and len(pick_types(info, meg=True, ref_meg=False, exclude=[])) > 0:
+        sensors["meg"] = _prep_meg_channels(info, ignore_ref=ignore_ref)
+    if eeg and len(pick_types(info, eeg=True, exclude=[])) > 0:
+        sensors["eeg"] = _prep_eeg_channels(info)
+
+    # Check that some channels were found
+    if len(sensors) == 0:
+        raise RuntimeError("No MEG or EEG channels found.")
+
+    # pick out final info
+    info = pick_info(
+        info, pick_types(info, meg=meg, eeg=eeg, ref_meg=False, exclude=[])
+    )
+
+    # Transform the source spaces into the appropriate coordinates
+    # (will either be HEAD or MRI)
+    src._transform_to("head", mri_head_t)
+    if len(src):
+        logger.info(
+            f"Source spaces are now in {_coord_frame_name(src[0]['coord_frame'])} "
+            "coordinates."
+        )
+
+    # Prepare the BEM model
+    eegnames = sensors.get("eeg", dict()).get("ch_names", [])
+    bem = _setup_bem(
+        bem, bem_extra, len(eegnames), mri_head_t, allow_none=allow_bem_none
+    )
+    del eegnames
+
+    # Circumvent numerical problems by excluding points too close to the skull,
+    # and check that sensors are not inside any BEM surface
+    if bem is not None:
+        kwargs = dict(limit=mindist, mri_head_t=mri_head_t, src=src)
+        if not bem["is_sphere"]:
+            check_surface = "inner skull surface"
+            check_inside_brain = _CheckInside(_bem_find_surface(bem, "inner_skull"))
+            logger.info("")
+            if len(bem["surfs"]) == 3:
+                check_surface = "scalp surface"
+                check_inside_head = _CheckInside(_bem_find_surface(bem, "head"))
+            else:
+                check_inside_head = check_inside_brain
+        else:
+            check_surface = "outermost sphere shell"
+            check_inside_brain = _CheckInsideSphere(bem)
+            if bem.radius is not None:
+                check_inside_head = _CheckInsideSphere(bem, check="outer")
+            else:
+
+                def check_inside_head(x):
+                    return np.zeros(len(x), bool)
+
+        if len(src):
+            _filter_source_spaces_LK(check_inside_brain, **kwargs)
+
+        if "meg" in sensors:
+            meg_loc = np.array([coil["r0"] for coil in sensors["meg"]["defs"]])
+            if not bem["is_sphere"]:
+                meg_loc = apply_trans(invert_transform(mri_head_t), meg_loc)
+            n_inside = check_inside_head(meg_loc).sum()
+            if n_inside:
+                msg = (
+                    f"Found {n_inside} MEG sensor{_pl(n_inside)} inside the "
+                    f"{check_surface}, perhaps coordinate frames and/or "
+                    "coregistration are incorrect"
+                )
+                _on_missing(on_inside, msg, name="on_inside", error_klass=RuntimeError)
+
+    if len(src):
+        rr = np.concatenate([s["rr"][s["vertno"]] for s in src])
+        if len(rr) < 1:
+            raise RuntimeError(
+                "No points left in source space after excluding "
+                "points close to inner skull."
+            )
+    else:
+        rr = np.zeros((0, 3))
+
+    # deal with free orientations:
+    source_nn = np.tile(np.eye(3), (len(rr), 1))
+    update_kwargs = dict(
+        nchan=len(info["ch_names"]),
+        nsource=len(rr),
+        info=info,
+        src=src,
+        source_nn=source_nn,
+        source_rr=rr,
+        surf_ori=False,
+        mri_head_t=mri_head_t,
+    )
+    return sensors, rr, info, update_kwargs, bem
+
+### ------ Modified version of _filter_source_spaces ----- #####
+# - Does not delete the two source points because they are outside inner skull 
+def _filter_source_spaces_LK(
+    surf_or_check_inside, *, limit, mri_head_t, src, n_jobs=None, verbose=None
+):
+    """Remove all source space points closer than a given limit (in mm)."""
+    from mne._fiff.constants import FIFF
+    from mne.transforms import invert_transform
+    from mne.surface import _CheckInside, _CheckInsideSphere
+    from mne.channels.montage import apply_trans
+    from mne.source_space._source_space import _adjust_patch_info
+    from mne.utils._logging import logger
+
+
+    if src[0]["coord_frame"] == FIFF.FIFFV_COORD_HEAD and mri_head_t is None:
+        raise RuntimeError(
+            "Source spaces are in head coordinates and no "
+            "coordinate transform was provided!"
+        )
+
+    # How close are the source points to the surface?
+    out_str = "Source spaces are in "
+    if src[0]["coord_frame"] == FIFF.FIFFV_COORD_HEAD:
+        inv_trans = invert_transform(mri_head_t)
+        out_str += "head coordinates."
+    elif src[0]["coord_frame"] == FIFF.FIFFV_COORD_MRI:
+        out_str += "MRI coordinates."
+    else:
+        out_str += f"unknown ({src[0]['coord_frame']}) coordinates."
+    logger.info(out_str)
+    out_str = "Checking that the sources are inside the surface"
+    if limit > 0.0:
+        out_str += f" and at least {limit:6.1f} mm away"
+    logger.info(out_str + " (will take a few...)")
+
+    # fit a sphere to a surf quickly
+    if isinstance(surf_or_check_inside, _CheckInside | _CheckInsideSphere):
+        check_inside = surf_or_check_inside
+    else:
+        if "rr" in surf_or_check_inside:
+            check_inside = _CheckInside(surf_or_check_inside)
+        else:
+            check_inside = _CheckInsideSphere(surf_or_check_inside)
+    del surf_or_check_inside
+
+    # Check that the source is inside surface (often the inner skull)
+    for idx, s in enumerate(src):
+        vertno = np.where(s["inuse"])[0]  # can't trust s['vertno'] this deep
+        # Convert all points here first to save time
+        r1s = s["rr"][vertno]
+        if s["coord_frame"] == FIFF.FIFFV_COORD_HEAD:
+            r1s = apply_trans(inv_trans["trans"], r1s)
+        
+        print(f"------ SRC index {idx} -----")
+        print(f"------ Vertno {vertno} -----")
+
+        #---- Original code ------#
+        #inside = check_inside(r1s, n_jobs=n_jobs)
+        #omit_outside = (~inside).sum()
+            
+        #--- Modified code (LK) ----#
+        if len(r1s)==2: #EOG 
+            inside = np.array([True, True])
+        elif len(r1s)==1: #ECG 
+            inside = np.array([True])
+        omit_outside = int(0)
+
+        # vectorized nearest using BallTree (or cdist)
+        omit_limit = 0
+        if limit > 0.0:
+            # only check "inside" points
+            idx = np.where(inside)[0]
+            check_r1s = r1s[idx]
+            if check_inside.inner_r is not None:
+                # ... and those that are at least inner_sphere - limit away
+                mask = (
+                    np.linalg.norm(check_r1s - check_inside.center, axis=-1)
+                    >= check_inside.inner_r - limit / 1000.0
+                )
+                idx = idx[mask]
+                check_r1s = check_r1s[mask]
+            dists = check_inside.query(check_r1s)[0]
+            close = dists < limit / 1000.0
+            omit_limit = np.sum(close)
+            inside[idx[close]] = False
+        s["inuse"][vertno[~inside]] = False
+        del vertno
+        s["nuse"] -= omit_outside + omit_limit
+        s["vertno"] = np.where(s["inuse"])[0]
+
+        if omit_outside > 0:
+            extras = [omit_outside]
+            extras += ["s", "they are"] if omit_outside > 1 else ["", "it is"]
+            logger.info(
+                "    %d source space point%s omitted because %s "
+                "outside the inner skull surface.",
+                *tuple(extras),
+            )
+        if omit_limit > 0:
+            extras = [omit_limit]
+            extras += ["s"] if omit_outside > 1 else [""]
+            extras += [limit]
+            logger.info(
+                "    %d source space point%s omitted because of the "
+                "%6.1f-mm distance limit.",
+                *tuple(extras),
+            )
+        # Adjust the patch inds as well if necessary
+        if omit_limit + omit_outside > 0:
+            _adjust_patch_info(s)
+    return check_inside
+
+
+
+
+
 """ 
 
 
